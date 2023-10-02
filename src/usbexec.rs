@@ -1,6 +1,6 @@
 use std::{thread::sleep, time::{Duration, SystemTime, UNIX_EPOCH}, ptr::NonNull};
-use libusb1_sys::{libusb_fill_control_setup, libusb_fill_control_transfer, libusb_alloc_transfer, libusb_open_device_with_vid_pid, libusb_transfer, libusb_submit_transfer, libusb_cancel_transfer, libusb_control_transfer, libusb_init, libusb_get_device, libusb_claim_interface, libusb_get_device_descriptor, libusb_device_descriptor, libusb_get_string_descriptor_ascii, libusb_device_handle};
-use rusb::{DeviceHandle, Context, DeviceList};
+use libusb1_sys::{libusb_fill_control_setup, libusb_fill_control_transfer, libusb_alloc_transfer, libusb_open_device_with_vid_pid, libusb_transfer, libusb_submit_transfer, libusb_cancel_transfer, libusb_control_transfer, libusb_init, libusb_get_device, libusb_get_device_descriptor, libusb_device_descriptor, libusb_get_string_descriptor_ascii, libusb_device_handle, libusb_get_device_list, libusb_open};
+use rusb::{DeviceHandle, Context};
 
 extern "system" fn _dummy(_: *mut libusb_transfer) {}
 
@@ -21,46 +21,72 @@ pub fn is_pwn_dfu(dev: *mut libusb_device_handle) -> bool {
 }
 
 pub fn aquire_device(vid: u16, pid: u16) -> *mut libusb_device_handle {
+    println!("aquire");
     unsafe {
-        let mut desc: libusb_device_descriptor = std::mem::zeroed();
+        let desc: *mut libusb_device_descriptor = std::mem::zeroed();
         let mut r = -1;
+        let handle: *mut *mut libusb_device_handle = std::mem::zeroed();
+        //let list: *mut *const *mut libusb_device = std::mem::zeroed();
+        let mut list = vec![];
+        let p = list.as_mut_ptr();
+        list.set_len(libusb_get_device_list(std::ptr::null_mut(), p).try_into().unwrap());
+        dbg!(&list);
         libusb_init(std::ptr::null_mut());
+        println!("init'd");
+
+        //let list_len = libusb_get_device_list(std::ptr::null_mut(), transmute(list[0]));
+        println!("dev list");
+        let list = list;
+
+        for device in list {
+            libusb_get_device_descriptor(device.cast(), desc);
+            println!("desc");
+            if (*desc).idVendor == vid {
+                if (*desc).idProduct == pid {
+                    libusb_open(device.cast(), handle);
+                    println!("opened");
+                    break;
+                }
+            }
+        }
+
+        //libusb_get_device_list(std::ptr::null_mut(), list as *mut *const *mut libusb_device);
 
         //let dev = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid, pid);
-        for device in DeviceList::new().unwrap().iter() {
-            let device_desc = match device.device_descriptor() {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            if device_desc.vendor_id() == 0x5ac {
-                println!("vid match");
-            }
-            if device_desc.product_id() == 0x1227 {
-                println!("pid match");
-            }
+        //for device in DeviceList::new().unwrap().iter() {
+        //    let device_desc = match device.device_descriptor() {
+        //        Ok(d) => d,
+        //        Err(_) => continue,
+        //    };
+        //    if device_desc.vendor_id() == 0x5ac {
+        //        println!("vid match");
+        //    }
+        //    if device_desc.product_id() == 0x1227 {
+        //        println!("pid match");
+        //    }
             
-        }
-        let dev = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid, pid);
+        //}
+        //let dev = libusb_open_device_with_vid_pid(std::ptr::null_mut(), vid, pid);
         sleep(Duration::from_secs(1));
 
-        let device1 = libusb_get_device(dev);
+        let device1 = libusb_get_device(handle.cast());
 
         //r = libusb_claim_interface(dev, 0);
         //if r < 0 {
         //    panic!("libusb_claim_interface error")
         //}
 
-        r = libusb_get_device_descriptor(device1, &mut desc);
+        r = libusb_get_device_descriptor(device1, desc);
         if r < 0 {
             panic!("libusb_get_device_descriptor error");
         }
 
         let mut serialnumber: u8 = 0;
-        r = libusb_get_string_descriptor_ascii(dev, desc.iSerialNumber, &mut serialnumber, 1);
+        r = libusb_get_string_descriptor_ascii(handle.cast(), (*desc).iSerialNumber, &mut serialnumber, 1);
         if r < 0 {
             panic!("libusb_get_string_descriptor_ascii error");
         }
-        return dev
+        return handle.cast()
     }
 }
 
